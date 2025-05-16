@@ -37,7 +37,7 @@ A web application that helps you parse bank statements (like the provided Discov
 1. Clone the repository
 ```bash
 git clone https://github.com/your-username/finance-ai.git
-cd finance-ai
+cd PennySprout
 ```
 
 2. Set up the backend
@@ -56,7 +56,7 @@ npm install
 
 ### Folder Structure
 ```bash
-pennysprout/
+PennySprout/
 ├── backend/
 │   ├── app.py
 │   ├── requirements.txt
