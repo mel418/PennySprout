@@ -32,11 +32,11 @@ def allowed_file(filename):
 # Dictionary of known bank/card statement formats
 BANK_FORMATS = {
     'discover': {
-        'header_patterns': [r'DISCOVER IT', r'CARDMEMBER SINCE'],
+        'header_patterns': [r'DISCOVER', r'(CARD|CARDMEMBER)'],  # Relaxed pattern matching
         'transaction_patterns': [
-            r'(\d{2}/\d{2}/\d{2})\s+(\d{2}/\d{2}/\d{2})\s+([-]?\$?\d+\.\d{2})\s+(.*?)\s+(\w+)$',
-            r'(\d{2}/\d{2})\s+(.*?)\s+(\w+)\s+([-]?\$\d+\.\d{2})$',
-            r'(\d{2}/\d{2}/\d{2})\s+(.*?)\s+(\w+)\s+([-]?\$\d+\.\d{2})$'
+            r'(\d{2}/\d{2})\s+(.*?)\s+(\w+)\s+([-]?\$?\d+\.\d{2})$',
+            r'(\d{2}/\d{2}/\d{2})\s+(.*?)\s+(\w+)\s+([-]?\$\d+\.\d{2})$',
+            r'(\d{2}/\d{2})\s+(.*?)\s+([-]?\$?\d+\.\d{2})$'
         ],
         'transaction_section_markers': ['TRANS.', 'DATE', 'PURCHASES', 'MERCHANT', 'CATEGORY', 'AMOUNT'],
         'balance_pattern': r'New Balance[:\s]+\$([\d,]+\.\d{2})',
@@ -45,9 +45,9 @@ BANK_FORMATS = {
         'minimum_payment_pattern': r'Minimum Payment Due[:\s]+\$([\d,]+\.\d{2})'
     },
     'orange_county_credit_union': {
-        'header_patterns': [r'ORANGE COUNTY\'S CREDIT UNION', r'ACCOUNT STATEMENT'],
+        'header_patterns': [r'ORANGE COUNTY', r'CREDIT UNION'],  # Relaxed pattern matching
         'transaction_patterns': [
-            r'(\d{2}/\d{2}/\d{2})\s+(\d{2}/\d{2}/\d{2})\s+([-]?\d+\.\d{2})\s+([-]?\d+\.\d{2})\s+([\d\.]+)\s+(.*?)$',
+            r'(\d{2}/\d{2}/\d{2})\s+(\d{2}/\d{2}/\d{2})\s+([-]?\d+\.\d{2})?\s+(\d+\.\d{2})?\s+(\d+\.\d{2})\s+(.*?)$',
             r'(\d{2}/\d{2}/\d{2})\s+(\d{2}/\d{2}/\d{2})\s+([-]?\d+\.\d{2})\s+(.*?)\s+([-]?\d+\.\d{2})$'
         ],
         'transaction_section_markers': ['Transaction', 'Date', 'Posting', 'Date', 'Withdrawal', 'Deposit', 'Balance'],
@@ -113,6 +113,8 @@ def parse_pdf(file_path):
                 page = pdf_reader.pages[page_num]
                 full_text += page.extract_text() + "\n"
             
+            logger.debug(f"First 200 characters of PDF: {full_text[:200]}")
+            
             # Identify the bank type based on patterns
             bank_type = identify_bank_type(full_text)
             
@@ -121,10 +123,22 @@ def parse_pdf(file_path):
                 # Extract statement information based on bank type
                 return extract_statement_info(full_text, bank_type)
             else:
-                logger.error("Unsupported bank statement format")
-                return {
-                    "error": "Unsupported bank statement format. Currently supporting Discover and Orange County Credit Union statements."
-                }
+                # If bank type cannot be determined, try a fallback
+                logger.warning("Bank type not identified. Checking for known keywords...")
+                
+                # Check for Discover keywords
+                if 'DISCOVER' in full_text or 'Discover' in full_text:
+                    logger.info("Found Discover keyword. Using Discover format.")
+                    return extract_statement_info(full_text, 'discover')
+                # Check for Orange County Credit Union keywords
+                elif 'ORANGE COUNTY' in full_text or 'Credit Union' in full_text:
+                    logger.info("Found OCCU keyword. Using OCCU format.")
+                    return extract_statement_info(full_text, 'orange_county_credit_union')
+                else:
+                    logger.error("Unsupported bank statement format")
+                    return {
+                        "error": "Unsupported bank statement format. Currently supporting Discover and Orange County Credit Union statements."
+                    }
     except Exception as e:
         logger.error(f"Error parsing PDF: {str(e)}")
         raise Exception(f"Error parsing PDF: {str(e)}")
@@ -138,6 +152,7 @@ def identify_bank_type(text):
         for pattern in patterns['header_patterns']:
             if re.search(pattern, text, re.IGNORECASE):
                 header_matches += 1
+                logger.debug(f"Matched pattern '{pattern}' for bank '{bank}'")
         
         # If all header patterns match, return the bank type
         if header_matches == len(patterns['header_patterns']):
@@ -191,8 +206,105 @@ def extract_statement_info(text, bank_type):
     
     if not statement_info["transactions"]:
         logger.warning(f"No transactions found for {bank_type} statement")
+        
+        # If this is a Discover card, try an alternative parsing approach
+        if bank_type == 'discover':
+            logger.info("Trying alternative transaction parsing for Discover")
+            # Look for date-amount-description patterns
+            alt_transactions = []
+            
+            # Find all lines with a date at the beginning
+            date_pattern = r'(\d{2}/\d{2})(?:/\d{2})?\s+(.*?)\s+(\$?-?\d+\.\d{2})$'
+            for line in text.split('\n'):
+                match = re.search(date_pattern, line.strip())
+                if match:
+                    date_str, description, amount_str = match.groups()
+                    
+                    # Convert date to yyyy-mm-dd format
+                    try:
+                        date_obj = datetime.strptime(date_str, '%m/%d')
+                        current_year = datetime.now().year
+                        date_formatted = f"{current_year}-{date_obj.month:02d}-{date_obj.day:02d}"
+                        
+                        # Format amount (remove $ and handle negatives)
+                        amount = float(amount_str.replace('$', '').replace(',', ''))
+                        
+                        # Categorize transaction
+                        category = categorize_transaction(description)
+                        
+                        alt_transactions.append({
+                            "date": date_formatted,
+                            "description": description.strip(),
+                            "category": category,
+                            "amount": amount,
+                            "account": "Discover Credit Card"
+                        })
+                        logger.debug(f"Found alternative transaction: {date_str} - {description} - {amount_str}")
+                    except Exception as e:
+                        logger.error(f"Error parsing alternative transaction: {str(e)}")
+            
+            if alt_transactions:
+                logger.info(f"Found {len(alt_transactions)} alternative transactions")
+                statement_info["transactions"] = alt_transactions
     else:
         logger.info(f"Found {len(statement_info['transactions'])} transactions for {bank_type} statement")
+    
+    # If still no transactions, look for anything that looks like a transaction
+    if not statement_info["transactions"]:
+        logger.warning("Still no transactions found. Trying last resort parsing...")
+        last_resort_transactions = []
+        
+        # Look for any line with a dollar amount
+        amount_pattern = r'.*?(\$?\d+\.\d{2}).*'
+        date_pattern = r'(\d{2}/\d{2}(?:/\d{2})?)'
+        
+        for line in text.split('\n'):
+            line = line.strip()
+            if '$' in line and re.search(amount_pattern, line):
+                # Try to find a date in the line
+                date_match = re.search(date_pattern, line)
+                date_str = date_match.group(1) if date_match else '01/01'
+                
+                # Extract amount
+                amount_match = re.search(amount_pattern, line)
+                if amount_match:
+                    amount_str = amount_match.group(1)
+                    
+                    # Get description (everything except the amount)
+                    description = line.replace(amount_str, '').strip()
+                    
+                    # Convert date to yyyy-mm-dd format
+                    try:
+                        if '/' in date_str and len(date_str) <= 5:  # MM/DD format
+                            date_obj = datetime.strptime(date_str, '%m/%d')
+                            current_year = datetime.now().year
+                            date_formatted = f"{current_year}-{date_obj.month:02d}-{date_obj.day:02d}"
+                        elif '/' in date_str:  # MM/DD/YY format
+                            date_obj = datetime.strptime(date_str, '%m/%d/%y')
+                            date_formatted = date_obj.strftime('%Y-%m-%d')
+                        else:
+                            date_formatted = f"{datetime.now().year}-01-01"
+                        
+                        # Format amount
+                        amount = float(amount_str.replace('$', '').replace(',', ''))
+                        
+                        # Categorize transaction
+                        category = categorize_transaction(description)
+                        
+                        last_resort_transactions.append({
+                            "date": date_formatted,
+                            "description": description,
+                            "category": category,
+                            "amount": amount,
+                            "account": "Credit Card"
+                        })
+                        logger.debug(f"Found last resort transaction: {date_formatted} - {description} - {amount}")
+                    except Exception as e:
+                        logger.error(f"Error parsing last resort transaction: {str(e)}")
+        
+        if last_resort_transactions:
+            logger.info(f"Found {len(last_resort_transactions)} last resort transactions")
+            statement_info["transactions"] = last_resort_transactions
     
     return statement_info
 
@@ -235,6 +347,27 @@ def extract_transactions(text, bank_type):
                             amount = float(amount_str.replace('$', '').replace(',', ''))
                             
                             # For Discover, expenses are already negative
+                            
+                            transactions.append({
+                                "date": date_formatted,
+                                "description": description.strip(),
+                                "category": category,
+                                "amount": amount,
+                                "account": "Discover Credit Card"
+                            })
+                            break
+                        elif len(match.groups()) == 3:  # Pattern with 3 groups
+                            date, description, amount_str = match.groups()
+                            # Convert date to yyyy-mm-dd format
+                            date_obj = datetime.strptime(date, '%m/%d')
+                            current_year = datetime.now().year
+                            date_formatted = f"{current_year}-{date_obj.month:02d}-{date_obj.day:02d}"
+                            
+                            # Format amount (remove $ and handle negatives)
+                            amount = float(amount_str.replace('$', '').replace(',', ''))
+                            
+                            # Categorize transaction
+                            category = categorize_transaction(description)
                             
                             transactions.append({
                                 "date": date_formatted,

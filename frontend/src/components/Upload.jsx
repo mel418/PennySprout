@@ -79,7 +79,7 @@ export default function Upload({ setLoading, loading, setParsedData }) {
 
             const data = await response.json();
             setParsedData(data);
-            navigate('/dashboard');
+            navigate('/');
         } catch (err) {
             setError(err.message);
         } finally {
